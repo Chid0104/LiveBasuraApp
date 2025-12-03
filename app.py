@@ -1,4 +1,4 @@
-# app.py — Premium BasuraNet (modern colors, 3-class)
+# app.py — BasuraNet Premium (3-class) — safe prediction text (no ???)
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 import cv2
@@ -7,10 +7,8 @@ import numpy as np
 import os
 import traceback
 
-# ---------- Config ----------
 st.set_page_config(page_title="BasuraNet — Premium", page_icon="🗑️", layout="wide")
 
-# ---------- Styles ----------
 st.markdown(
     """
     <style>
@@ -41,9 +39,8 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------- Header ----------
 st.markdown(
-    f"""
+    """
     <div class="header">
       <div>
         <div class="title">BasuraNet</div>
@@ -54,15 +51,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# ---------- Video Processor ----------
 class PremiumVideoProcessor(VideoProcessorBase):
     def __init__(self):
         self.model = None
         self.model_loaded = False
         self.frame_count = 0
-        self.last_label = "Loading..."
+        self.last_label = ""
         self.last_conf = 0.0
-        self.last_pred_text = "Loading..."
+        self.last_pred_text = ""  # sanitized display string
         self.labels = ["Biodegradable", "Recyclable", "Residual"]
         self._try_load_model()
 
@@ -88,29 +84,57 @@ class PremiumVideoProcessor(VideoProcessorBase):
 
     def predict(self, batch):
         preds = self.model.predict(batch, verbose=0)
-        preds = np.asarray(preds)
+        if preds is None:
+            return None
         if preds.ndim == 2 and preds.shape[0] == 1:
             preds = preds[0]
         return preds
+
+    def _format_prediction(self, preds):
+        # preds must be a 1D array of floats (probabilities or logits)
+        try:
+            if preds is None:
+                return ""
+            preds = np.asarray(preds, dtype=float)
+            if preds.size == 0 or not np.isfinite(preds).all():
+                return ""
+            # If values look like logits (not normalized), try softmax safely
+            if preds.min() < 0 or preds.max() > 1 or not np.isclose(preds.sum(), 1.0, atol=1e-2):
+                exps = np.exp(preds - np.max(preds))
+                probs = exps / (np.sum(exps) + 1e-12)
+            else:
+                probs = preds / (np.sum(preds) + 1e-12)
+
+            idx = int(np.argmax(probs))
+            conf = float(probs[idx])
+            if not np.isfinite(conf) or conf < 0.0 or conf > 1.0:
+                return ""
+            label = self.labels[idx] if 0 <= idx < len(self.labels) else "Unknown"
+            return f"{label} — {conf*100:.1f}%"
+        except Exception:
+            return ""
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         self.frame_count += 1
 
+        # Only run prediction periodically to reduce load
         if self.model_loaded and (self.frame_count % 10 == 0):
             try:
                 batch = self.preprocess(img)
                 preds = self.predict(batch)
-                idx = int(np.argmax(preds))
-                conf = float(preds[idx])
-                label = self.labels[idx]
-                self.last_label = label
-                self.last_conf = conf
-                self.last_pred_text = f"{label} — {conf*100:.1f}%"
-            except:
-                self.last_pred_text = "Prediction Error"
+                safe_text = self._format_prediction(preds)
+                # If formatting returned empty, do not show "???" or invalid text
+                if safe_text:
+                    self.last_pred_text = safe_text
+                else:
+                    # keep previous text or clear (choose clear to avoid stale invalids)
+                    self.last_pred_text = ""
+            except Exception:
+                # on any error, make sure we don't show invalid placeholder
+                self.last_pred_text = ""
 
-        # Overlay with modern gradient
+        # Overlay: clean dark green rectangle and text only if we have text
         h, w, _ = img.shape
         box_w = min(520, int(w * 0.6))
         box_h = 56
@@ -121,31 +145,27 @@ class PremiumVideoProcessor(VideoProcessorBase):
         sub = img[y1:y2, x1:x2]
         if sub.size != 0:
             overlay = sub.copy()
-            # gradient background
-            for i in range(box_h):
-                alpha = i / box_h
-                overlay[i, :] = (0 + int(120*alpha), 128 + int(50*alpha), 64 + int(60*alpha))
+            overlay[:] = (25, 70, 40)  # solid dark green
             cv2.addWeighted(overlay, 0.75, sub, 0.25, 0, sub)
             img[y1:y2, x1:x2] = sub
 
-        # Text
-        cv2.putText(img, self.last_pred_text, (x1 + 18, y1 + 36),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+        if self.last_pred_text:
+            cv2.putText(img, self.last_pred_text, (x1 + 18, y1 + 36),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
-# ---------- Main layout ----------
 st.markdown("<div class='card'>", unsafe_allow_html=True)
 st.subheader("Live Camera")
+
 ctx = webrtc_streamer(
     key="premium_cam",
     video_processor_factory=PremiumVideoProcessor,
     media_stream_constraints={"video": {"width": 720, "height": 720}, "audio": False},
     async_processing=True,
 )
-st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------- Footer ----------
+st.markdown("</div>", unsafe_allow_html=True)
 st.markdown("---")
 st.caption("BasuraNet — Premium real-time waste detection. 3-class AI model.")
